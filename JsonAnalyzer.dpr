@@ -113,7 +113,7 @@ resourcestring
 function TAnalyzationOptionHelper.GetIdent: String;
 const
   LIdents: array [TAnalyzationOption] of String = (
-    'e', 'r', 'x'
+    'p', 'r', 'x'
   );
 begin
   Result := LIdents[Self];
