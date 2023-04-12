@@ -21,6 +21,7 @@ uses
   System.Math,
   System.IOUtils,
   System.Classes,
+  System.RegularExpressions,
   System.JSON.Readers, System.JSON.Builders, System.JSON.Types;
 
 type
@@ -29,7 +30,8 @@ type
   TAnalyzationOption = (
     Root,
     Depth,
-    Excluded
+    Excluded,
+    Filter
   );
 
   TAnalyzationOptionHelper = record helper for TAnalyzationOption
@@ -44,10 +46,12 @@ type
     class function GetRoot: String; static;
     class function GetDepth: Integer; static;
     class function GetExcluded: String; static;
+    class function GetFilter: String; static;
   public
     class property Root: String read GetRoot;
     class property Depth: Integer read GetDepth;
     class property Excluded: String read GetExcluded;
+    class property Filter: String read GetFilter;
   end;
 
   TAnalyzationProc = procedure (const AJsonIterator: TJSONIterator);
@@ -102,9 +106,10 @@ resourcestring
     ' -c (count sub nodes)' + sLineBreak +
     sLineBreak +
     'Possible options are:' + sLineBreak +
-    ' -p ROOT (define path to root node)' + sLineBreak +
+    ' -p PATH (define path to root node)' + sLineBreak +
     ' -r DEPTH (define recursion depth)' + sLineBreak +
-    ' -x KEY (exclude key)';
+    ' -x KEY (exclude key pattern)' + sLineBreak +
+    ' -f PATH (filter for path pattern)';
   Result_Success = 'Analyzation successful';
   Result_Error = 'Error: %s';
 
@@ -113,7 +118,7 @@ resourcestring
 function TAnalyzationOptionHelper.GetIdent: String;
 const
   LIdents: array [TAnalyzationOption] of String = (
-    'p', 'r', 'x'
+    'p', 'r', 'x', 'f'
   );
 begin
   Result := LIdents[Self];
@@ -140,6 +145,11 @@ end;
 class function TAnalyzationOptions.GetExcluded: String;
 begin
   FindCmdLineSwitch(TAnalyzationOption.Excluded.Ident, Result);
+end;
+
+class function TAnalyzationOptions.GetFilter: String;
+begin
+  FindCmdLineSwitch(TAnalyzationOption.Filter.Ident, Result);
 end;
 
 class function TAnalyzationOptions.GetRoot: String;
@@ -185,29 +195,73 @@ end;
 
 function TAnalyzationHelper.GetProc: TAnalyzationProc;
 
+  function CheckNode(const AJsonIterator: TJSONIterator): Boolean;
+  var
+    LPattern: String;
+  begin
+    Result := AJsonIterator.Key.IsEmpty;
+    if not Result then
+    begin
+      LPattern := TAnalyzationOptions.Excluded;
+      Result := LPattern.IsEmpty;
+      if not Result then
+      begin
+        Result := not TRegEx.IsMatch(AJsonIterator.Key, LPattern);
+      end;
+    end;
+  end;
+
+  function CheckProcessing(const AJsonIterator: TJSONIterator; const AInitialDepth: Integer): Boolean;
+  var
+    LPattern: String;
+  begin
+    LPattern := TAnalyzationOptions.Filter;
+    Result := LPattern.IsEmpty;
+    if not Result then
+    begin
+      Result := TRegEx.IsMatch(AJsonIterator.GetPath(AInitialDepth), LPattern);
+    end;
+  end;
+
+  function CheckRecursion(const AJsonIterator: TJSONIterator; const ADepth: Integer): Boolean;
+  var
+    LMaxDepth: Integer;
+  begin
+    LMaxDepth := TAnalyzationOptions.Depth;
+    Result := (LMaxDepth = 0) or (LMaxDepth > ADepth);
+  end;
+
   procedure ViewAll(const AJsonIterator: TJSONIterator);
   var
+    LInitialDepth: Integer;
     LDepth: Integer;
 
     procedure View;
     begin
       while AJsonIterator.Next do
       begin
-        Writeln(String.Format('%s'#$2017 + IfThen(not AJsonIterator.Key.IsEmpty, ' ') + '%s (%s)', [DupeString(' '#$2551, LDepth), AJsonIterator.Key, TJsonType.Create(AJsonIterator.&Type).Name]));
-        if ((TAnalyzationOptions.Depth = 0) or (TAnalyzationOptions.Depth > LDepth)) and (AJsonIterator.Key.IsEmpty or TAnalyzationOptions.Excluded.IsEmpty or not AJsonIterator.Key.Equals(TAnalyzationOptions.Excluded)) then
+        if CheckNode(AJsonIterator) then
         begin
-          if AJsonIterator.Recurse then
+          if CheckProcessing(AJsonIterator, LInitialDepth) then
           begin
-            Inc(LDepth);
-            View;
-            AJsonIterator.Return;
-            Dec(LDepth);
+            Writeln(String.Format('%s'#$2017 + IfThen(not AJsonIterator.Key.IsEmpty, ' ') + '%s (%s)', [DupeString(' '#$2551, LDepth), AJsonIterator.Key, TJsonType.Create(AJsonIterator.&Type).Name]));
+          end;
+          if CheckRecursion(AJsonIterator, LDepth) then
+          begin
+            if AJsonIterator.Recurse then
+            begin
+              Inc(LDepth);
+              View;
+              AJsonIterator.Return;
+              Dec(LDepth);
+            end;
           end;
         end;
       end;
     end;
 
   begin
+    LInitialDepth := AJsonIterator.Depth;
     LDepth := 1;
     Writeln('(object)');
     View;
@@ -217,6 +271,7 @@ function TAnalyzationHelper.GetProc: TAnalyzationProc;
   type
     TCounts = array [TJsonType] of Integer;
   var
+    LInitialDepth: Integer;
     LDepth: Integer;
     LCounts: TCounts;
     LType: TJsonType;
@@ -225,21 +280,28 @@ function TAnalyzationHelper.GetProc: TAnalyzationProc;
     begin
       while AJsonIterator.Next do
       begin
-        Inc(LCounts[TJsonType.Create(AJsonIterator.&Type)]);
-        if ((TAnalyzationOptions.Depth = 0) or (TAnalyzationOptions.Depth > LDepth)) and (AJsonIterator.Key.IsEmpty or TAnalyzationOptions.Excluded.IsEmpty or not AJsonIterator.Key.Equals(TAnalyzationOptions.Excluded)) then
+        if CheckNode(AJsonIterator) then
         begin
-          if AJsonIterator.Recurse then
+          if CheckProcessing(AJsonIterator, LInitialDepth) then
           begin
-            Inc(LDepth);
-            Count;
-            AJsonIterator.Return;
-            Dec(LDepth);
+            Inc(LCounts[TJsonType.Create(AJsonIterator.&Type)]);
+          end;
+          if CheckRecursion(AJsonIterator, LDepth) then
+          begin
+            if AJsonIterator.Recurse then
+            begin
+              Inc(LDepth);
+              Count;
+              AJsonIterator.Return;
+              Dec(LDepth);
+            end;
           end;
         end;
       end;
     end;
 
   begin
+    LInitialDepth := AJsonIterator.Depth;
     LDepth := 1;
     LCounts := Default(TCounts);
     Count;
@@ -336,50 +398,50 @@ var
   JsonIterator: TJSONIterator;
 begin
   try
-    FileName := ParamStr(1);
-    if FileName.IsEmpty or FileName.StartsWith('-') or FileName.StartsWith('/') then
+    if FindCmdLineSwitch('?') then
     begin
-      raise EAnalyzeError.CreateRes(@Error_MissingFileName);
-    end;
-    if not TPath.HasValidPathChars(FileName, False) then
+      Writeln(Result_Info);
+    end else
     begin
-      raise EAnalyzeError.CreateResFmt(@Error_InvalidFileName, [FileName]);
-    end;
-    if not TFile.Exists(FileName) then
-    begin
-      raise EAnalyzeError.CreateResFmt(@Error_FileNotExists, [FileName]);
-    end;
-    FileStream := TFile.OpenRead(FileName);
-    try
-      StreamReader := TStreamReader.Create(FileStream);
+      FileName := ParamStr(1);
+      if FileName.IsEmpty or FileName.StartsWith('-') or FileName.StartsWith('/') then
+      begin
+        raise EAnalyzeError.CreateRes(@Error_MissingFileName);
+      end;
+      if not TPath.HasValidPathChars(FileName, False) then
+      begin
+        raise EAnalyzeError.CreateResFmt(@Error_InvalidFileName, [FileName]);
+      end;
+      if not TFile.Exists(FileName) then
+      begin
+        raise EAnalyzeError.CreateResFmt(@Error_FileNotExists, [FileName]);
+      end;
+      FileStream := TFile.OpenRead(FileName);
       try
-        JsonReader := TJsonTextReader.Create(StreamReader);
+        StreamReader := TStreamReader.Create(FileStream);
         try
-          JsonIterator := TJSONIterator.Create(JsonReader,
-            procedure (AReader: TJsonReader)
-            begin
-              FileStream.Position := 0;
-            end
-          );
+          JsonReader := TJsonTextReader.Create(StreamReader);
           try
-            if FindCmdLineSwitch('?') then
-            begin
-              Writeln(Result_Info);
-            end else
-            begin
+            JsonIterator := TJSONIterator.Create(JsonReader,
+              procedure (AReader: TJsonReader)
+              begin
+                FileStream.Position := 0;
+              end
+            );
+            try
               TAnalyzationMethod.Current.Run(JsonIterator);
+            finally
+              JsonIterator.Free;
             end;
           finally
-            JsonIterator.Free;
+            JsonReader.Free;
           end;
         finally
-          JsonReader.Free;
+          StreamReader.Free;
         end;
       finally
-        StreamReader.Free;
+        FileStream.Free;
       end;
-    finally
-      FileStream.Free;
     end;
   except
     on E: Exception do
@@ -387,4 +449,5 @@ begin
       Writeln(String.Format(Result_Error, [E.Message]));
     end;
   end;
+  Readln;
 end.
